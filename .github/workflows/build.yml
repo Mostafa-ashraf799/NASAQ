@@ -1,0 +1,92 @@
+name: Build NASAQ APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # لو في ملف zip في الريبو: نفكه فوق الملفات (من غير commit). لو المشروع مرفوع مفكوك يتجاهل الخطوة.
+      - name: Unpack zip
+        run: |
+          Z=$(ls *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$Z" ]; then
+            echo "Unpacking $Z"
+            mkdir -p _u && unzip -q "$Z" -d _u
+            # لو الزيب فيه فولدر واحد بس  ندخل جواه
+            if [ ! -f _u/settings.gradle.kts ] && [ "$(ls -1 _u | wc -l)" = "1" ] && [ -d "_u/$(ls -1 _u)" ]; then
+              cp -a "_u/$(ls -1 _u)/." .
+            else
+              cp -a _u/. .
+            fi
+            rm -rf _u
+          fi
+          ls -la
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Android SDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --console=plain --stacktrace 2>&1 | tee build.log
+
+      # لو البناء فشل: يظهر الأخطاء بس في ملخص الـ run (من غير ما تفتح اللوج الطويل)
+      - name: Show errors only
+        if: failure()
+        run: |
+          {
+            echo '### ❌ أخطاء البناء'
+            echo '```'
+            grep -E '^e: |error:|What went wrong|Execution failed|Unresolved|Could not|Caused by' -A3 build.log | head -120
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NASAQ-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Build release APK
+        id: rel
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle :app:assembleRelease --console=plain 2>&1 | tee release.log
+
+      - name: Show release errors
+        if: failure() || steps.rel.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          [ -f release.log ] && { echo '### Release build'; echo '```'; grep -E '^e: |error:|What went wrong' -A3 release.log | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: NASAQ-release
+          path: app/build/outputs/apk/release/*.apk
